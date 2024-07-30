@@ -20,6 +20,7 @@ import (
 	"user-service/internal/controller"
 	"user-service/internal/events"
 	"user-service/internal/metrics"
+	"user-service/internal/service"
 	"user-service/internal/storage"
 )
 
@@ -56,7 +57,8 @@ func main() {
 		logrus.WithError(err).Fatal("Failed to create health handler")
 	}
 
-	httpServer := setupHTTPServer(cfg.HTTPServerPort, usersStore, userEventsKafkaProducer, healthHandler.Handler())
+	svc := service.New(usersStore, userEventsKafkaProducer)
+	httpServer := setupHTTPServer(cfg.HTTPServerPort, svc, healthHandler.Handler())
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logrus.WithError(err).Fatal("failed to start HTTP server")
@@ -69,14 +71,14 @@ func main() {
 	os.Exit(0)
 }
 
-func setupHTTPServer(port int, store controller.UsersStorage, producer controller.EventsProducer, health http.Handler) *http.Server {
+func setupHTTPServer(port int, svc *service.Service, health http.Handler) *http.Server {
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.Use(metrics.HTTPRequestDurationMetricsMiddleware())
 	router.Use(gin.LoggerWithWriter(logrus.StandardLogger().Out))
 
 	v1Group := router.Group("v1")
-	controller.CreateUsersHandlers(v1Group, store, producer)
+	controller.CreateUsersHandlers(v1Group, svc)
 
 	router.GET("/health", gin.WrapH(health))
 	router.GET("/metrics", gin.WrapH(promhttp.Handler()))

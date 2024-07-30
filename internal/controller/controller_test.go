@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"io"
 	"net/http"
@@ -18,19 +16,17 @@ import (
 
 // Unit tests that cover the User Creation handler logic. In a real project I would cover
 // also all the remaining handlers. The tests would look very similar, therefore not writing them
-// as I believe the existing ones should be enough to showcase the way I would write them.
+// as I believe the existing ones should be enough to showcase the way to write them.
 
 func Test_CreateUserHandler(t *testing.T) {
 	tests := []struct {
-		name                   string
-		payload                model.User
-		stringPayload          string
-		dbError                error
-		eventsError            error
-		wantStatusCode         int
-		wantFailureBody        string
-		wantDBCreationCalled   bool
-		wantEventPublishCalled bool
+		name              string
+		payload           model.User
+		stringPayload     string
+		serviceError      error
+		wantStatusCode    int
+		wantFailureBody   string
+		wantServiceCalled bool
 	}{
 		{
 			name: "happy path",
@@ -42,9 +38,8 @@ func Test_CreateUserHandler(t *testing.T) {
 				Country:   "valid",
 				Email:     "valid@gmail.com",
 			},
-			wantStatusCode:         http.StatusCreated,
-			wantDBCreationCalled:   true,
-			wantEventPublishCalled: true,
+			wantStatusCode:    http.StatusCreated,
+			wantServiceCalled: true,
 		},
 		{
 			name: "invalid payload - missing firstname",
@@ -59,7 +54,7 @@ func Test_CreateUserHandler(t *testing.T) {
 			wantFailureBody: "{\"error\":\"first name is required\"}",
 		},
 		{
-			name: "DB user creation fails",
+			name: "Service call fails",
 			payload: model.User{
 				FirstName: "valid",
 				LastName:  "valid",
@@ -68,41 +63,24 @@ func Test_CreateUserHandler(t *testing.T) {
 				Country:   "valid",
 				Email:     "valid@gmail.com",
 			},
-			dbError:              errors.New("DB error"),
-			wantStatusCode:       http.StatusInternalServerError,
-			wantFailureBody:      "{\"error\":\"user not created\"}",
-			wantDBCreationCalled: true,
+			serviceError:      errors.New("DB error"),
+			wantStatusCode:    http.StatusInternalServerError,
+			wantFailureBody:   "{\"error\":\"user not created\"}",
+			wantServiceCalled: true,
 		},
 		{
-			name: "Event publish failed - still seems as success to api caller",
-			payload: model.User{
-				FirstName: "valid",
-				LastName:  "valid",
-				Nickname:  "valid",
-				Password:  "valid",
-				Country:   "valid",
-				Email:     "valid@gmail.com",
-			},
-			eventsError:            errors.New("events error"),
-			wantStatusCode:         http.StatusCreated,
-			wantDBCreationCalled:   true,
-			wantEventPublishCalled: true,
-		},
-		{
-			name:                   "invalid body",
-			stringPayload:          "invalid payload",
-			wantStatusCode:         http.StatusBadRequest,
-			wantDBCreationCalled:   false,
-			wantEventPublishCalled: false,
-			wantFailureBody:        "{\"error\":\"invalid character 'i' looking for beginning of value\"}",
+			name:              "invalid body",
+			stringPayload:     "invalid payload",
+			wantStatusCode:    http.StatusBadRequest,
+			wantServiceCalled: false,
+			wantFailureBody:   "{\"error\":\"invalid character 'i' looking for beginning of value\"}",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			storageMock := new(StorageMock)
-			eventsMock := new(EventsProducerMock)
+			serviceMock := new(ServiceMock)
 
-			createUserHandler := createUser(storageMock, eventsMock)
+			createUserHandler := createUser(serviceMock)
 			w := httptest.NewRecorder()
 			ctx, _ := gin.CreateTestContext(w)
 
@@ -118,11 +96,8 @@ func Test_CreateUserHandler(t *testing.T) {
 
 			ctx.Request = &http.Request{Body: io.NopCloser(reqPayload)}
 
-			if tt.wantDBCreationCalled {
-				storageMock.On("CreateUser", ctx, mock.MatchedBy(userCreationMatchFunc(tt.payload))).Return(tt.dbError)
-			}
-			if tt.wantEventPublishCalled {
-				eventsMock.On("Produce", mock.MatchedBy(userCreationEventMatchFunc(tt.payload))).Return(tt.eventsError)
+			if tt.wantServiceCalled {
+				serviceMock.On("CreateUser", ctx, tt.payload).Return(&tt.payload, tt.serviceError)
 			}
 
 			// call the handler
@@ -133,44 +108,13 @@ func Test_CreateUserHandler(t *testing.T) {
 				var createdUser model.User
 				err := json.Unmarshal(w.Body.Bytes(), &createdUser)
 				require.NoError(t, err)
-				require.True(t, userCreationMatchFunc(tt.payload)(createdUser))
+				require.Equal(t, tt.payload, createdUser)
 			} else {
 				assert.Equal(t, tt.wantFailureBody, w.Body.String())
 			}
 
-			storageMock.AssertExpectations(t)
-			eventsMock.AssertExpectations(t)
+			serviceMock.AssertExpectations(t)
 		})
-	}
-}
-
-// userCreationMatchFunc matches user from CREATE request with the created one.
-func userCreationMatchFunc(userToCreate model.User) func(gotUser model.User) bool {
-	return func(gotUser model.User) bool {
-		return gotUser.ID != uuid.UUID{} &&
-			gotUser.FirstName == userToCreate.FirstName &&
-			gotUser.LastName == userToCreate.LastName &&
-			gotUser.Nickname == userToCreate.Nickname &&
-			gotUser.Password == userToCreate.Password &&
-			gotUser.Email == userToCreate.Email &&
-			gotUser.Country == userToCreate.Country &&
-			gotUser.CreatedAt.After(userToCreate.CreatedAt) &&
-			gotUser.UpdatedAt.After(userToCreate.UpdatedAt)
-	}
-}
-
-func userCreationEventMatchFunc(userToCreate model.User) func(event any) bool {
-	return func(event any) bool {
-		e, ok := event.(model.UserEvent)
-		if !ok {
-			return false
-		}
-		gotUser, ok := e.UserData.(model.User)
-		if !ok {
-			return false
-		}
-
-		return userCreationMatchFunc(userToCreate)(gotUser)
 	}
 }
 

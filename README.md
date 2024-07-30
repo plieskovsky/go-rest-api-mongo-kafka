@@ -1,6 +1,7 @@
 # User service
 
-Service that provides user management via REST API. The service publishes events to a kafka topic upon User creation, update or deletion.
+Golang Service that provides user management via REST API. The service publishes events to a kafka topic upon User creation, update or deletion. Users
+are stored in a MongoDB.
 
 ## REST API Documentation
 
@@ -24,7 +25,7 @@ Service can be configured via environment variables. If not provided, defaults a
 | KAFKA_GRACEFUL_SHUTDOWN_PERIOD | duration of the graceful Kafka producer shutdown             | duration | 5s                                       |
 
 
-## Homework Notes/Improvements:
+## Notes/Improvements:
 - wrote some unit and some e2e tests to showcase how I would write and structure them - did not cover all the functionality to not spend too much time on them
 - did not write documentation at each function/variable etc. as their names are self-explanatory. Added docs only in case it's needed or helpful.
 - mongo and kafka connections are created in a way, so they can be reused if needed by other mongo collections/kafka topic producers

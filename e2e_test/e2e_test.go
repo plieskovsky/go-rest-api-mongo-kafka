@@ -11,7 +11,7 @@ import (
 // E2E tests that cover the Happy path of each REST endpoint + unhappy paths of some endpoints.
 // In a real world project would cover each endpoint with both happy & unhappy + would add tests
 // for some generic REST failures. Not writing them now as I believe the existing ones should be
-// sufficient to showcase the way i would write and structure them.
+// sufficient to showcase the way to write and structure them.
 
 func (suite *E2ETestSuite) Test_CreateUser_HappyPath() {
 	require := suite.Require()

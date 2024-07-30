@@ -10,34 +10,30 @@ import (
 	"net/http"
 	"net/mail"
 	"time"
+	storage_err "user-service/internal/errors"
 	"user-service/internal/model"
-	storage_err "user-service/internal/storage"
 )
 
-type UsersStorage interface {
-	CreateUser(ctx context.Context, user model.User) error
-	GetUser(ctx context.Context, id uuid.UUID) (*model.User, error)
+type Service interface {
+	CreateUser(ctx context.Context, user model.User) (*model.User, error)
+	GetUserByID(ctx context.Context, id uuid.UUID) (*model.User, error)
 	GetUsers(ctx context.Context, params model.GetUsersParams) ([]model.User, error)
-	UpdateUser(ctx context.Context, user model.User) (*model.User, error)
+	UpdateUser(ctx context.Context, user model.User) error
 	DeleteUser(ctx context.Context, id uuid.UUID) error
 }
 
-type EventsProducer interface {
-	Produce(event any) error
-}
-
 // CreateUsersHandlers registers users endpoint paths with handlers to given router.
-func CreateUsersHandlers(router *gin.RouterGroup, storage UsersStorage, producer EventsProducer) {
+func CreateUsersHandlers(router *gin.RouterGroup, svc Service) {
 	usersGroup := router.Group("users")
-	usersGroup.POST("", createUser(storage, producer))
-	usersGroup.PUT(fmt.Sprintf(":%s", userIDPathParam), updateUser(storage, producer))
-	usersGroup.GET(fmt.Sprintf(":%s", userIDPathParam), getUser(storage))
-	usersGroup.DELETE(fmt.Sprintf(":%s", userIDPathParam), deleteUser(storage, producer))
-	usersGroup.GET("", getUsers(storage))
+	usersGroup.POST("", createUser(svc))
+	usersGroup.PUT(fmt.Sprintf(":%s", userIDPathParam), updateUser(svc))
+	usersGroup.GET(fmt.Sprintf(":%s", userIDPathParam), getUser(svc))
+	usersGroup.DELETE(fmt.Sprintf(":%s", userIDPathParam), deleteUser(svc))
+	usersGroup.GET("", getUsers(svc))
 }
 
-// createUser returns a handler that creates the user in the DB and produces new User creation event.
-func createUser(storage UsersStorage, producer EventsProducer) gin.HandlerFunc {
+// createUser returns a handler that handles user creation.
+func createUser(svc Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var user model.User
 		if err := c.BindJSON(&user); err != nil {
@@ -52,21 +48,8 @@ func createUser(storage UsersStorage, producer EventsProducer) gin.HandlerFunc {
 			return
 		}
 
-		newID, err := uuid.NewUUID()
+		createdUser, err := svc.CreateUser(c, user)
 		if err != nil {
-			logrus.WithError(err).Error("failed to create UUID for new user")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "user not created"})
-			c.Abort()
-			return
-		}
-
-		user.ID = newID
-		// db precision is in millis - doesn't support nanos
-		now := time.Now().Truncate(time.Millisecond)
-		user.CreatedAt = now
-		user.UpdatedAt = now
-
-		if err = storage.CreateUser(c, user); err != nil {
 			logrus.WithError(err).
 				WithField("user_id", user.ID).
 				Error("failed to create user")
@@ -75,20 +58,12 @@ func createUser(storage UsersStorage, producer EventsProducer) gin.HandlerFunc {
 			return
 		}
 
-		err = producer.Produce(model.NewUserCreatedEvent(user))
-		if err != nil {
-			// just log but proceed with HTTP response as this is internal, non customer visible action
-			logrus.WithError(err).
-				WithField("user_id", user.ID).
-				Error("failed to produce create user event")
-		}
-
-		c.JSON(http.StatusCreated, user)
+		c.JSON(http.StatusCreated, createdUser)
 	}
 }
 
-// getUser returns a handler that retrieves the user from the DB.
-func getUser(storage UsersStorage) gin.HandlerFunc {
+// getUser returns a handler that handles user retrieval by ID.
+func getUser(svc Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID, err := uuid.Parse(c.Param(userIDPathParam))
 		if err != nil {
@@ -97,7 +72,7 @@ func getUser(storage UsersStorage) gin.HandlerFunc {
 			return
 		}
 
-		user, err := storage.GetUser(c, userID)
+		user, err := svc.GetUserByID(c, userID)
 		if err != nil {
 			if errors.Is(err, storage_err.NotFoundError) {
 				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
@@ -116,8 +91,8 @@ func getUser(storage UsersStorage) gin.HandlerFunc {
 	}
 }
 
-// getUsers returns a handler that retrieves the users from the DB based on url params.
-func getUsers(storage UsersStorage) gin.HandlerFunc {
+// getUsers returns a handler that handles the users retrieval from the DB based on url params.
+func getUsers(svc Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		params, err := parseGetUsersParams(c)
 		if err != nil {
@@ -126,7 +101,7 @@ func getUsers(storage UsersStorage) gin.HandlerFunc {
 			return
 		}
 
-		users, err := storage.GetUsers(c, *params)
+		users, err := svc.GetUsers(c, *params)
 		if err != nil {
 			logrus.WithError(err).Error("failed to get users")
 			c.Status(http.StatusInternalServerError)
@@ -143,11 +118,10 @@ func getUsers(storage UsersStorage) gin.HandlerFunc {
 	}
 }
 
-// updateUser returns a handler that updates the user in the DB and produces User updated event.
-func updateUser(storage UsersStorage, producer EventsProducer) gin.HandlerFunc {
+// updateUser returns a handler that handles user update.
+func updateUser(svc Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var user model.User
-		produceEvent := true
 
 		if err := c.BindJSON(&user); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -172,18 +146,9 @@ func updateUser(storage UsersStorage, producer EventsProducer) gin.HandlerFunc {
 		// db precision is in millis - doesn't support nanos
 		user.UpdatedAt = time.Now().Truncate(time.Millisecond)
 
-		updated, err := storage.UpdateUser(c, user)
+		err = svc.UpdateUser(c, user)
 		if err != nil {
-			var unmarshallErr storage_err.ResponseUnmarshallError
-			if errors.As(err, &unmarshallErr) {
-				// edge case - the User in the DB is updated but the DB response marshall failed.
-				// Log the error and skip event produce but create a success HTTP response because
-				// this is a success from the caller point of view.
-				produceEvent = false
-				logrus.WithError(err).
-					WithField("user_id", userID).
-					Error("failed to unmarshall DB response")
-			} else if errors.Is(err, storage_err.NotFoundError) {
+			if errors.Is(err, storage_err.NotFoundError) {
 				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 				c.Abort()
 				return
@@ -197,22 +162,12 @@ func updateUser(storage UsersStorage, producer EventsProducer) gin.HandlerFunc {
 			}
 		}
 
-		if produceEvent {
-			err = producer.Produce(model.NewUserUpdatedEvent(*updated))
-			if err != nil {
-				// just log but proceed with HTTP response as this is internal, non customer visible action
-				logrus.WithError(err).
-					WithField("user_id", user.ID.String()).
-					Error("failed to produce update user event")
-			}
-		}
-
 		c.Status(http.StatusNoContent)
 	}
 }
 
-// deleteUser returns a handler that removes the user from the DB and produces User deleted event.
-func deleteUser(storage UsersStorage, producer EventsProducer) gin.HandlerFunc {
+// deleteUser returns a handler that handles user removal.
+func deleteUser(svc Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID, err := uuid.Parse(c.Param(userIDPathParam))
 		if err != nil {
@@ -221,7 +176,7 @@ func deleteUser(storage UsersStorage, producer EventsProducer) gin.HandlerFunc {
 			return
 		}
 
-		err = storage.DeleteUser(c, userID)
+		err = svc.DeleteUser(c, userID)
 		if err != nil {
 			if errors.Is(err, storage_err.NotFoundError) {
 				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
@@ -234,14 +189,6 @@ func deleteUser(storage UsersStorage, producer EventsProducer) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "user not deleted"})
 			c.Abort()
 			return
-		}
-
-		err = producer.Produce(model.NewUserDeletedEvent(userID))
-		if err != nil {
-			// just log but proceed with HTTP response as this is internal, non customer visible action
-			logrus.WithError(err).
-				WithField("user_id", userID).
-				Error("failed to produce delete user event")
 		}
 
 		c.Status(http.StatusNoContent)

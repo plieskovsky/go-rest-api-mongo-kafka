@@ -8,6 +8,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"time"
+	custom_err "user-service/internal/errors"
 	"user-service/internal/model"
 )
 
@@ -53,9 +54,9 @@ func (m MongoUsersStorage) CreateUser(ctx context.Context, user model.User) erro
 	return nil
 }
 
-// GetUser gets the user from the DB based on the provided id. If no user is found NotFoundError error is returned.
+// GetUserByID gets the user from the DB based on the provided id. If no user is found NotFoundError error is returned.
 // If DB operation fails the unchanged error is returned.
-func (m MongoUsersStorage) GetUser(ctx context.Context, id uuid.UUID) (*model.User, error) {
+func (m MongoUsersStorage) GetUserByID(ctx context.Context, id uuid.UUID) (*model.User, error) {
 	var dbCtx, cancel = context.WithTimeout(ctx, m.dbTimeout)
 	defer cancel()
 
@@ -63,7 +64,7 @@ func (m MongoUsersStorage) GetUser(ctx context.Context, id uuid.UUID) (*model.Us
 	result := m.users.FindOne(dbCtx, filter)
 	if err := result.Err(); err != nil {
 		if errors.Is(result.Err(), mongo.ErrNoDocuments) {
-			return nil, NotFoundError
+			return nil, custom_err.NotFoundError
 		}
 		return nil, err
 	}
@@ -126,7 +127,7 @@ func (m MongoUsersStorage) UpdateUser(ctx context.Context, user model.User) (*mo
 	result := m.users.FindOneAndUpdate(dbCtx, filter, update, options.FindOneAndUpdate().SetReturnDocument(options.After))
 	if err := result.Err(); err != nil {
 		if errors.Is(result.Err(), mongo.ErrNoDocuments) {
-			return nil, NotFoundError
+			return nil, custom_err.NotFoundError
 		}
 		return nil, err
 	}
@@ -134,7 +135,7 @@ func (m MongoUsersStorage) UpdateUser(ctx context.Context, user model.User) (*mo
 	var updated model.User
 	err := result.Decode(&updated)
 	if err != nil {
-		return nil, ResponseUnmarshallError{err: err}
+		return nil, custom_err.NewResponseUnmarshallError(err)
 	}
 
 	return &updated, nil
@@ -152,7 +153,7 @@ func (m MongoUsersStorage) DeleteUser(ctx context.Context, id uuid.UUID) error {
 	}
 
 	if result.DeletedCount == 0 {
-		return NotFoundError
+		return custom_err.NotFoundError
 	}
 
 	return nil
